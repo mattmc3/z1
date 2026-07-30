@@ -1,78 +1,31 @@
 #!/usr/bin/env zsh
 # prompt_z1_setup: Add a nice prompt for Z1 users.
+#
+# The prompt itself is one format string, so rearranging it does not mean
+# rewriting anything:
+#   zstyle ':z1:prompt' format '$pwd $char '
+#   zstyle ':z1:prompt' right-format '$git( $timer)'
+#
+# lib/prompt.zsh explains what a format can hold and how to write a segment of
+# your own; lib/prompt-segments.zsh has the ones used here, plus `status` and
+# `timer`, which this prompt leaves out of its default shape.
 
 # Remove right prompt from prior commands
 setopt transient_rprompt
 
-function prompt_pwd {
-  setopt local_options extended_glob
-
-  local cur_pwd="${PWD/#$HOME/~}"
-  local MATCH result
-
-  if [[ "$cur_pwd" == (#m)[/~] ]]; then
-    result="$MATCH"
-  elif zstyle -m ':z1:prompt' pwd-length 'full'; then
-    result=${PWD}
-  elif zstyle -m ':z1:prompt' pwd-length 'long'; then
-    result=${cur_pwd}
-  else
-    result="${${${${(@j:/:M)${(@s:/:)cur_pwd}##.#?}:h}%/}//\%/%%}/${${cur_pwd:t}//\%/%%}"
-  fi
-
-  print -r -- "$result"
-}
-
-function +vi-git_status {
-  # Check for untracked files or updated submodules since vcs_info does not.
-  if [[ -n $(git ls-files --other --exclude-standard 2> /dev/null) ]]; then
-    hook_com[unstaged]="%F{${_prompt_z1_colors[red]}}${_prompt_z1_chars[dirty]}%f"
-  fi
-
-  ### git: Show ⇡N/⇣N when your local branch is ahead-of or behind remote HEAD.
-  # Make sure you have added misc to your 'formats':  %m
-  local ahead behind
-  local -a gitstatus
-
-  # Cleared first: the git backend fills misc with rebase patch state, and the
-  # action in actionformats already says a rebase is underway.
-  hook_com[misc]=''
-
-  # Exit early in case the worktree is on a detached HEAD
-  git rev-parse ${hook_com[branch]}@{upstream} >/dev/null 2>&1 || return 0
-
-  local -a ahead_and_behind=(
-    $(git rev-list --left-right --count HEAD...${hook_com[branch]}@{upstream} 2>/dev/null)
-  )
-
-  ahead=${ahead_and_behind[1]}
-  behind=${ahead_and_behind[2]}
-
-  (( $ahead )) && gitstatus+=( "⇡${ahead}" )
-  (( $behind )) && gitstatus+=( "⇣${behind}" )
-
-  hook_com[misc]=${(j:/:)gitstatus}
-}
+# What the prompt looks like when nothing says otherwise. A zstyle wins over
+# these, so a user rearranges the prompt without touching this file.
+typeset -g _prompt_z1_format='$pwd $char '
+typeset -g _prompt_z1_right_format='$git'
 
 function prompt_z1_precmd {
   setopt local_options
   unsetopt xtrace ksh_arrays
-  _prompt_z1_pwd=$(prompt_pwd)
-
-  # Split off the last component so it can be highlighted on its own.
-  if [[ "$_prompt_z1_pwd" == */* ]]; then
-    _prompt_z1_pwd_head="${_prompt_z1_pwd%/*}/"
-    _prompt_z1_pwd_tail="${_prompt_z1_pwd##*/}"
-  else
-    _prompt_z1_pwd_head=''
-    _prompt_z1_pwd_tail="$_prompt_z1_pwd"
-  fi
-  (( $+functions[async-task] )) || vcs_info
 
   # Re-read the transient style each time, so turning it on or off takes effect
   # from the next prompt rather than only at setup.
   if zstyle -t ':z1:prompt' transient; then
-    _prompt_z1_transient="%F{${_prompt_z1_colors[cyan]}}${_prompt_z1_chars[success]}%f "
+    _prompt_z1_transient="$z1_prompt_fg[cyan]$z1_prompt_char[success]%f "
     [[ "$widgets[accept-line]" == user:prompt_z1_accept_line ]] \
       || zle -N accept-line prompt_z1_accept_line
   else
@@ -81,6 +34,7 @@ function prompt_z1_precmd {
       && zle -A .accept-line accept-line
   fi
 
+  # Put the full prompt back after a line was collapsed to the character alone.
   PROMPT=$_prompt_z1_full
 }
 
@@ -91,104 +45,55 @@ function prompt_z1_accept_line {
   zle .accept-line
 }
 
-# What the async worker runs. vcs_info fills a variable, so print it.
-function prompt_z1_vcs {
-  vcs_info
-  print -rn -- "$vcs_info_msg_0_"
-}
-
 function prompt_z1_setup {
   setopt local_options
   unsetopt xtrace ksh_arrays
   prompt_opts=(cr percent sp subst)
 
-  # Load required functions.
-  autoload -Uz add-zsh-hook
-  autoload -Uz vcs_info
+  # %x is this file even when autoloaded, so the libraries beside it are findable
+  # whether z1 was cloned whole or copied one file at a time.
+  0=${(%):-%x}
+  local libdir=${0:A:h:h}/lib
 
-  # Add hook for calling vcs_info before each command.
-  add-zsh-hook precmd prompt_z1_precmd
+  # vcs_info off the critical path when the library is there. The prompt works
+  # without it, just synchronously.
+  [[ -r $libdir/async.zsh ]] && source $libdir/async.zsh
 
-  # vcs_info costs tens of ms per prompt, so run it off the critical path when
-  # lib/async.zsh is around. %x is this file even when autoloaded.
-  local _z1_lib=${${(%):-%x}:A:h:h}/lib/async.zsh
-  [[ -r $_z1_lib ]] && source $_z1_lib
-
-  # Define default prompt colors.
-  typeset -gA _prompt_z1_colors=(
-    black   "000"
-    red     "001"
-    green   "002"
-    yellow  "003"
-    blue    "004"
-    magenta "005"
-    cyan    "006"
-    white   "007"
-  )
-
-  # Use extended color pallete if available.
-  if [[ $TERM = *256color* || $TERM = *rxvt* ]]; then
-    zstyle -s ':z1:prompt:colors' black   '_prompt_z1_colors[black]'   || _prompt_z1_colors[black]="000"
-    zstyle -s ':z1:prompt:colors' red     '_prompt_z1_colors[red]'     || _prompt_z1_colors[red]="160"
-    zstyle -s ':z1:prompt:colors' green   '_prompt_z1_colors[green]'   || _prompt_z1_colors[green]="076"
-    zstyle -s ':z1:prompt:colors' yellow  '_prompt_z1_colors[yellow]'  || _prompt_z1_colors[yellow]="178"
-    zstyle -s ':z1:prompt:colors' blue    '_prompt_z1_colors[blue]'    || _prompt_z1_colors[blue]="039"
-    zstyle -s ':z1:prompt:colors' magenta '_prompt_z1_colors[magenta]' || _prompt_z1_colors[magenta]="168"
-    zstyle -s ':z1:prompt:colors' cyan    '_prompt_z1_colors[cyan]'    || _prompt_z1_colors[cyan]="037"
-    zstyle -s ':z1:prompt:colors' white   '_prompt_z1_colors[white]'   || _prompt_z1_colors[white]="255"
+  if [[ ! -r $libdir/prompt.zsh || ! -r $libdir/prompt-segments.zsh ]]; then
+    print -ru2 "prompt_z1_setup: cannot find lib/prompt.zsh beside $libdir:h"
+    return 1
   fi
+  source $libdir/prompt.zsh
+  source $libdir/prompt-segments.zsh
 
-  # Define default prompt symbols.
-  typeset -gA _prompt_z1_chars=(
-    success "%%"
-    error   "%%"
-    vicmd   "V"
-    stash   "="
-    dirty   "*"
-    ahead   "+"
-    behind  "-"
-  )
+  # A style wins, otherwise this prompt's own shape.
+  z1_prompt_format=$_prompt_z1_format
+  z1_prompt_right_format=$_prompt_z1_right_format
 
-  # Use unicode chars if available.
-  if ! zstyle -t ':z1:prompt:unicode' disable; then
-    zstyle -s ':z1:prompt:character' success '_prompt_z1_chars[success]' || _prompt_z1_chars[success]="❯" # "❱"
-    zstyle -s ':z1:prompt:character' error   '_prompt_z1_chars[error]'   || _prompt_z1_chars[error]="❯" # "❱"
-    zstyle -s ':z1:prompt:character' vicmd   '_prompt_z1_chars[vicmd]'   || _prompt_z1_chars[vicmd]="❮" # "❰"
-    zstyle -s ':z1:prompt:character' stash   '_prompt_z1_chars[stash]'   || _prompt_z1_chars[stash]="☰"
-    zstyle -s ':z1:prompt:character' dirty   '_prompt_z1_chars[dirty]'   || _prompt_z1_chars[dirty]="•"  # "✱"
-    zstyle -s ':z1:prompt:character' ahead   '_prompt_z1_chars[ahead]'   || _prompt_z1_chars[ahead]="⇡"
-    zstyle -s ':z1:prompt:character' behind  '_prompt_z1_chars[behind]'  || _prompt_z1_chars[behind]="⇣"
-  fi
-
-  # Set vcs_info parameters.
-  zstyle ':vcs_info:*' enable git
-  zstyle ':vcs_info:*' check-for-changes true
-  zstyle ':vcs_info:*' stagedstr "%F{${_prompt_z1_colors[green]}}${_prompt_z1_chars[dirty]}%f"
-  zstyle ':vcs_info:*' unstagedstr "%F{${_prompt_z1_colors[yellow]}}${_prompt_z1_chars[dirty]}%f"
-  zstyle ':vcs_info:*' formats "%F{${_prompt_z1_colors[magenta]}}%b%f%c%u%m"
-  zstyle ':vcs_info:*' actionformats "%F{${_prompt_z1_colors[magenta]}}%b%f%c%u%m|%F{${_prompt_z1_colors[cyan]}}%a%f"
-  zstyle ':vcs_info:git*+set-message:*' hooks git_status
-
-  # Keymap picks the character, exit status picks the color, both resolved when
-  # the prompt is expanded.
-  local pcolor='%(?.%F{${_prompt_z1_colors[green]}}.%F{${_prompt_z1_colors[red]}})'
-  local pchar='${_prompt_z1_chars[${KEYMAP:-main}]:-%(?.$_prompt_z1_chars[success].$_prompt_z1_chars[error])}'
-
-  # Define prompts.
-  PROMPT='%F{${_prompt_z1_colors[blue]}}$_prompt_z1_pwd_head%f'
-  PROMPT+='%B%F{${_prompt_z1_colors[cyan]}}$_prompt_z1_pwd_tail%f%b '
-  PROMPT+=$pcolor$pchar'%f '
-  if (( $+functions[async-task] )); then
-    async-task prompt_z1_vcs prompt_z1_vcs
-    RPROMPT='${async_output[prompt_z1_vcs]}'
-  else
-    RPROMPT='${vcs_info_msg_0_}'
-  fi
+  z1-prompt-build
 
   # An accepted line can collapse to just the character, in cyan rather than the
-  # status color, so scrollback stays quiet. precmd picks this up:
+  # status color, so scrollback stays quiet. prompt_z1_precmd picks this up:
   #   zstyle ':z1:prompt' transient 'yes'
   typeset -g _prompt_z1_full=$PROMPT _prompt_z1_transient=
+
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd prompt_z1_precmd
+
+  # Hand back the hooks and the accept-line widget when another theme takes
+  # over. Only there once promptinit has a theme applied, which is not the case
+  # when this file is sourced on its own.
+  (( $+functions[prompt_cleanup] )) && prompt_cleanup prompt_z1_cleanup
+  return 0
+}
+
+function prompt_z1_cleanup {
+  autoload -Uz add-zsh-hook
+  add-zsh-hook -d precmd prompt_z1_precmd
+  [[ "$widgets[accept-line]" == user:prompt_z1_accept_line ]] \
+    && zle -A .accept-line accept-line
+  (( $+functions[z1-prompt-unbuild] )) && z1-prompt-unbuild
+  return 0
 }
 
 function prompt_z1_preview {

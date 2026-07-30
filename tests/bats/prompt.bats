@@ -1,6 +1,11 @@
 #!/usr/bin/env bats
 # Prompts are made available to zsh's own prompt system through fpath. Starting
 # that system is left to the user, so these tests run promptinit themselves.
+#
+# The bundled prompt is now composed: lib/prompt.zsh is the engine,
+# lib/prompt-segments.zsh has the segments, and prompt_z1_setup picks a format
+# and adds the transient behavior. These check the prompt as a user meets it;
+# tests/bats/prompt_engine.bats checks the engine on its own.
 
 load helpers/common
 
@@ -21,10 +26,12 @@ teardown() { z1_teardown; }
     prompt z1
     print "rc: $?"
     print "precmd: $(( $precmd_functions[(I)prompt_z1_precmd] > 0 ))"
+    print "render: $(( $precmd_functions[(I)z1-prompt-render] > 0 ))"
     [[ -n "$PROMPT" ]] && print "prompt: set" || print "prompt: empty"'
   assert_success
   assert_line "rc: 0"
   assert_line "precmd: 1"
+  assert_line "render: 1"
   assert_line "prompt: set"
 }
 
@@ -74,17 +81,63 @@ teardown() { z1_teardown; }
   assert_line "prompts in fpath: 0"
 }
 
-# The character comes from $KEYMAP and the color from $?, both resolved during
-# prompt expansion. These render with `print -P` after forcing an exit status,
-# and compare the escapes in visible form. Characters are set explicitly so the
-# assertions do not move when the default glyphs are changed.
+#
+# Shape
+#
+
+# The whole point of the revamp: the prompt is a format string, so it can be
+# rearranged without touching the theme.
+@test "the format style rearranges the prompt" {
+  z1_zsh 'zstyle ":z1:prompt" format "[\$pwd]"
+    zstyle ":z1:prompt" right-format ""
+    source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd $HOME
+    z1-prompt-render
+    print "rendered: [${(V)$(print -Pn -- $PROMPT)}]"
+    print "rprompt: [$RPROMPT]"'
+  assert_success
+  assert_line "rendered: [[^[[38;5;39m^[[39m^[[1m^[[38;5;37m~^[[39m^[[0m]]"
+  assert_line "rprompt: []"
+}
+
+@test "the default shape is the path, the character, and git on the right" {
+  z1_zsh 'source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    print "format: $z1_prompt_format"
+    print "right: $z1_prompt_right_format"'
+  assert_success
+  assert_line 'format: $pwd $char '
+  assert_line 'right: $git'
+}
+
+@test "a segment of your own drops into the format" {
+  z1_zsh 'zstyle ":z1:prompt" format "\$pwd \$mine \$char "
+    source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    function my-segment { REPLY="<mine>" }
+    z1-prompt-segment mine my-segment
+    z1-prompt-build
+    print -Pn -- $PROMPT | grep -q "<mine>" && print "mine: shown" || print "mine: missing"'
+  assert_success
+  assert_line "mine: shown"
+}
+
+#
+# Prompt character
+#
+# The character comes from $KEYMAP and the color from $?, both resolved while
+# zsh draws rather than once per command. These render the char segment on its
+# own, so the assertions do not move when the rest of the prompt changes.
+# Characters are set explicitly so they do not move when the defaults change.
+#
 setup_chars() {
   echo 'zstyle ":z1:prompt:character" success S
     zstyle ":z1:prompt:character" error E
     zstyle ":z1:prompt:character" vicmd V
     source $Z1
     autoload -Uz promptinit && promptinit && prompt z1
-    render() { KEYMAP=$2; ( exit $1 ); local o=$(print -Pn -- $PROMPT); print -r -- "${(V)o}" }'
+    render() { KEYMAP=$2; ( exit $1 ); local o=$(print -Pn -- $z1_prompt_frag[char]); print -r -- "${(V)o}" }'
 }
 
 @test "vi command mode gets its own prompt character" {
@@ -93,9 +146,9 @@ setup_chars() {
     print "viins: $(render 0 viins)"
     print "vicmd: $(render 0 vicmd)"'
   assert_success
-  assert_output_contains "main:  ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mS^[[39m"
-  assert_output_contains "viins: ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mS^[[39m"
-  assert_output_contains "vicmd: ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mV^[[39m"
+  assert_line "main:  ^[[38;5;76mS^[[39m"
+  assert_line "viins: ^[[38;5;76mS^[[39m"
+  assert_line "vicmd: ^[[38;5;76mV^[[39m"
 }
 
 # zle also reports isearch and listscroll. Looking the keymap up in the
@@ -104,10 +157,10 @@ setup_chars() {
   z1_zsh "$(setup_chars)"'
     for k in isearch listscroll nonsense ""; do print "[$k] $(render 0 $k)"; done'
   assert_success
-  assert_output_contains "[isearch] ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mS^[[39m"
-  assert_output_contains "[listscroll] ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mS^[[39m"
-  assert_output_contains "[nonsense] ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mS^[[39m"
-  assert_output_contains "[] ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mS^[[39m"
+  assert_line "[isearch] ^[[38;5;76mS^[[39m"
+  assert_line "[listscroll] ^[[38;5;76mS^[[39m"
+  assert_line "[nonsense] ^[[38;5;76mS^[[39m"
+  assert_line "[] ^[[38;5;76mS^[[39m"
 }
 
 @test "a failed command switches to the error character in red" {
@@ -115,8 +168,8 @@ setup_chars() {
     print "ok:   $(render 0 main)"
     print "fail: $(render 1 main)"'
   assert_success
-  assert_output_contains "ok:   ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mS^[[39m"
-  assert_output_contains "fail: ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;160mE^[[39m"
+  assert_line "ok:   ^[[38;5;76mS^[[39m"
+  assert_line "fail: ^[[38;5;160mE^[[39m"
 }
 
 # In command mode the keymap still owns the character, but the color follows the
@@ -126,32 +179,32 @@ setup_chars() {
     print "ok:   $(render 0 vicmd)"
     print "fail: $(render 1 vicmd)"'
   assert_success
-  assert_output_contains "ok:   ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mV^[[39m"
-  assert_output_contains "fail: ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;160mV^[[39m"
+  assert_line "ok:   ^[[38;5;76mV^[[39m"
+  assert_line "fail: ^[[38;5;160mV^[[39m"
 }
 
-@test "the color styles are honored" {
+@test "the palette styles are honored" {
   z1_zsh "$(setup_chars)"'
-    zstyle ":z1:prompt:colors" red 196
-    zstyle ":z1:prompt:colors" green 046
+    zstyle ":z1:prompt:palette" red 196
+    zstyle ":z1:prompt:palette" green 046
     prompt z1
     print "ok:   $(render 0 main)"
     print "fail: $(render 1 main)"'
   assert_success
-  assert_output_contains "ok:   ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;46mS^[[39m"
-  assert_output_contains "fail: ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;196mE^[[39m"
+  assert_line "ok:   ^[[38;5;46mS^[[39m"
+  assert_line "fail: ^[[38;5;196mE^[[39m"
 }
 
-@test "disabling unicode gives ASCII characters" {
-  z1_zsh 'zstyle ":z1:prompt:unicode" disable yes
+@test "asking for ascii gives ASCII characters" {
+  z1_zsh 'zstyle ":z1:prompt" ascii yes
     source $Z1
     autoload -Uz promptinit && promptinit && prompt z1
-    render() { KEYMAP=$2; ( exit $1 ); local o=$(print -Pn -- $PROMPT); print -r -- "${(V)o}" }
-    print "ok:    $(render 0 main)"
-    print "vicmd: $(render 0 vicmd)"'
+    render() { KEYMAP=$1; local o=$(print -Pn -- $z1_prompt_frag[char]); print -r -- "${(V)o}" }
+    print "ok:    $(render main)"
+    print "vicmd: $(render vicmd)"'
   assert_success
-  assert_output_contains "ok:    ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76m%^[[39m"
-  assert_output_contains "vicmd: ^[[38;5;39m^[[39m^[[1m^[[38;5;37m^[[39m^[[0m ^[[38;5;76mV^[[39m"
+  assert_line "ok:    ^[[38;5;76m%^[[39m"
+  assert_line "vicmd: ^[[38;5;76mV^[[39m"
 }
 
 # prompt_z1_preview used to call editor-info, a prezto function z1 does not have.
@@ -163,23 +216,29 @@ setup_chars() {
   assert_line "leftover: no"
 }
 
+#
+# git
+#
+
 @test "the prompt runs vcs_info asynchronously when lib/async.zsh is there" {
   z1_zsh 'source $Z1
     autoload -Uz promptinit && promptinit && prompt z1
     print "async: $(( $+functions[async-task] ))"
     print "rprompt: $RPROMPT"
-    print "task: ${async_tasks[prompt_z1_vcs]}"'
+    print "task: ${async_tasks[z1-prompt-git]}"'
   assert_success
   assert_line "async: 1"
-  assert_line 'rprompt: ${async_output[prompt_z1_vcs]}'
-  assert_line "task: prompt_z1_vcs"
+  assert_line 'rprompt: ${async_output[z1-prompt-git]}'
+  assert_line "task: z1-prompt-async-git"
 }
 
-# The prompt has to work on its own, since a lone z1.zsh has no lib/ beside it.
+# The prompt has to work without lib/async.zsh, which is optional. lib/prompt.zsh
+# and its segments are not, so a copy has to bring those along.
 @test "the prompt falls back to synchronous vcs_info without the library" {
-  mkdir -p "$TEST_HOME/solo/prompts"
+  mkdir -p "$TEST_HOME/solo/prompts" "$TEST_HOME/solo/lib"
   cp "$PRJDIR/z1.zsh" "$TEST_HOME/solo/z1.zsh"
   cp "$PRJDIR/prompts/prompt_z1_setup" "$TEST_HOME/solo/prompts/"
+  cp "$PRJDIR/lib/prompt.zsh" "$PRJDIR/lib/prompt-segments.zsh" "$TEST_HOME/solo/lib/"
 
   z1_zsh 'source $HOME/solo/z1.zsh
     autoload -Uz promptinit && promptinit && prompt z1
@@ -187,42 +246,242 @@ setup_chars() {
     print "rprompt: $RPROMPT"'
   assert_success
   assert_line "async: 0"
-  assert_line 'rprompt: ${vcs_info_msg_0_}'
+  assert_line 'rprompt: ${z1_prompt_frag[git]}'
 }
 
-@test "precmd does not run vcs_info when the async task has it" {
+# Asking for a segment in the background and then running it inline as well
+# would be paying twice for the same thing.
+@test "render does not run the git segment when the async task has it" {
   z1_zsh 'source $Z1
     autoload -Uz promptinit && promptinit && prompt z1
     vcs_info_msg_0_=untouched
-    prompt_z1_precmd
+    z1-prompt-render
     print "sync ran: $([[ $vcs_info_msg_0_ == untouched ]] && print no || print yes)"'
   assert_success
   assert_line "sync ran: no"
 }
 
+make_repo() {
+  local r="$TEST_HOME/repo"
+  git -C "$TEST_HOME" init -q repo
+  git -C "$r" config user.email t@example.com
+  git -C "$r" config user.name tester
+  : >"$r/file"
+  git -C "$r" add file
+  git -C "$r" commit -qm init
+}
+
 @test "the async task produces the branch name in a repo" {
-  mkdir -p "$TEST_HOME/repo"
-  git -C "$TEST_HOME/repo" init -q
-  git -C "$TEST_HOME/repo" config user.email t@example.com
-  git -C "$TEST_HOME/repo" config user.name tester
-  : >"$TEST_HOME/repo/file"
-  git -C "$TEST_HOME/repo" add file
-  git -C "$TEST_HOME/repo" commit -qm init
+  make_repo
 
   z1_zsh 'source $Z1
     autoload -Uz promptinit && promptinit && prompt z1
     builtin cd $HOME/repo
-    prompt_z1_precmd; async-run; async-wait
-    print "vcs: ${async_output[prompt_z1_vcs]}"'
+    async-run; async-wait
+    print "vcs: ${async_output[z1-prompt-git]}"'
   assert_success
   assert_output_contains "vcs: "
   refute_line "vcs: "
 }
 
-# Transient prompt collapses an accepted line to the character alone. It cannot
-# be observed without a terminal repainting, so these check the parts: the
-# widget binding, the collapsed string, and precmd putting the full prompt back.
-# The style is read in precmd, so these call it rather than only loading.
+@test "the branch name is magenta" {
+  make_repo
+
+  z1_zsh 'source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd $HOME/repo
+    async-run; async-wait
+    o=$(print -Pn -- $RPROMPT); print "branch: ${(V)o}"'
+  assert_success
+  assert_output_contains "branch: ^[[38;5;168m"
+}
+
+# vcs_info's git backend fills %m with rebase patch state, including a raw sha.
+# The hook clears it, since actionformats already names the action.
+@test "a rebase does not leak patch state into the prompt" {
+  local r="$TEST_HOME/repo"
+  git -C "$TEST_HOME" init -q repo
+  git -C "$r" config user.email t@example.com
+  git -C "$r" config user.name tester
+  echo one >"$r/f"; git -C "$r" add f; git -C "$r" commit -qm one
+  git -C "$r" checkout -q -b side
+  echo side >"$r/f"; git -C "$r" commit -qam side
+  git -C "$r" checkout -q -
+  echo main >"$r/f"; git -C "$r" commit -qam main
+  git -C "$r" rebase side >/dev/null 2>&1 || true
+
+  z1_zsh 'source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd $HOME/repo
+    async-run; async-wait
+    print "rprompt: ${(V)$(print -Pn -- $RPROMPT)}"'
+  assert_success
+  assert_output_contains "rebase"
+  refute_output_matches "applied"
+  refute_output_matches "[0-9a-f]{40}"
+}
+
+@test "the dirty marker uses the palette red, not basic red" {
+  make_repo
+  : >"$TEST_HOME/repo/untracked"
+
+  z1_zsh 'source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd $HOME/repo
+    async-run; async-wait
+    print "rprompt: ${(V)$(print -Pn -- $RPROMPT)}"'
+  assert_success
+  assert_output_contains "^[[38;5;160m"
+  refute_output_matches '\^\[\[31m'
+}
+
+# The ahead and behind markers have their own styles, so they have to come from
+# the character table rather than being written into the hook.
+@test "the ahead marker comes from the character table" {
+  make_repo
+  git -C "$TEST_HOME" clone -q "$TEST_HOME/repo" clone
+  git -C "$TEST_HOME/clone" config user.email t@example.com
+  git -C "$TEST_HOME/clone" config user.name tester
+  echo more >"$TEST_HOME/clone/file"
+  git -C "$TEST_HOME/clone" commit -qam more
+
+  z1_zsh 'zstyle ":z1:prompt:character" ahead "A"
+    source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd $HOME/clone
+    async-run; async-wait
+    print "rprompt: ${async_output[z1-prompt-git]}"'
+  assert_success
+  assert_output_contains "A1"
+}
+
+#
+# pwd
+#
+
+# The last path component is picked out from the rest: leading part blue, final
+# component bold and cyan. $z1_prompt_pwd is the path before it was colored.
+@test "the last path component is bold cyan and the rest blue" {
+  mkdir -p "$TEST_HOME/one/two/three"
+
+  z1_zsh 'source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd $HOME/one/two/three
+    z1-prompt-render
+    print "pwd: [$z1_prompt_pwd]"
+    o=$(print -Pn -- $PROMPT); print "rendered: ${(V)o}"'
+  assert_success
+  assert_line "pwd: [~/o/t/three]"
+  assert_output_contains "^[[38;5;39m~/o/t/^[[39m^[[1m^[[38;5;37mthree^[[39m^[[0m"
+}
+
+@test "home is a single bold cyan component" {
+  z1_zsh 'source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd $HOME
+    z1-prompt-render
+    print "pwd: [$z1_prompt_pwd]"
+    o=$(print -Pn -- $PROMPT); print "rendered: ${(V)o}"'
+  assert_success
+  assert_line "pwd: [~]"
+  assert_output_contains "^[[1m^[[38;5;37m~^[[39m^[[0m"
+}
+
+@test "root keeps its slash" {
+  z1_zsh 'source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd /
+    z1-prompt-render
+    print "pwd: [$z1_prompt_pwd]"'
+  assert_success
+  assert_line "pwd: [/]"
+}
+
+@test "the pwd-length style shows the whole path" {
+  mkdir -p "$TEST_HOME/one/two/three"
+
+  z1_zsh 'zstyle ":z1:prompt" pwd-length long
+    source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    builtin cd $HOME/one/two/three
+    z1-prompt-render
+    print "pwd: [$z1_prompt_pwd]"'
+  assert_success
+  assert_line "pwd: [~/one/two/three]"
+}
+
+#
+# status and timer
+#
+# Neither is in the default shape, so these check they are there to be asked for.
+#
+
+@test "the status segment shows a failing exit code and nothing else" {
+  z1_zsh 'zstyle ":z1:prompt" format "\$status"
+    source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    r() { ( exit $1 ); print -Pn -- $PROMPT }
+    print "ok: [$(r 0)]"
+    print "fail: [${(V)$(r 3)}]"'
+  assert_success
+  assert_line "ok: []"
+  assert_line "fail: [^[[38;5;160m3^[[39m]"
+}
+
+@test "the timer segment stays quiet under its threshold" {
+  z1_zsh 'zstyle ":z1:prompt" format "(\$timer)"
+    zstyle ":z1:prompt:segment:timer" threshold 5
+    source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    z1_prompt_timer_elapsed=1.5
+    z1-prompt-render
+    print "quick: [$(print -Pn -- $PROMPT)]"
+    z1_prompt_timer_elapsed=7.25
+    z1-prompt-render
+    print "slow: [${(V)$(print -Pn -- $PROMPT)}]"'
+  assert_success
+  assert_line "quick: []"
+  assert_line "slow: [^[[38;5;178m7.2s^[[39m]"
+}
+
+@test "the timer counts minutes once there are any" {
+  z1_zsh 'zstyle ":z1:prompt" format "\$timer"
+    source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    z1_prompt_timer_elapsed=125
+    z1-prompt-render
+    print "mins: [${(V)$(print -Pn -- $PROMPT)}]"
+    z1_prompt_timer_elapsed=3725
+    z1-prompt-render
+    print "hours: [${(V)$(print -Pn -- $PROMPT)}]"'
+  assert_success
+  assert_line "mins: [^[[38;5;178m2m5s^[[39m]"
+  assert_line "hours: [^[[38;5;178m1h2m5s^[[39m]"
+}
+
+@test "the timer hooks measure a real command" {
+  z1_zsh 'source $Z1
+    autoload -Uz promptinit && promptinit && prompt z1
+    z1-prompt-timer-preexec
+    sleep 0.2
+    z1-prompt-timer-precmd
+    print "measured: $(( z1_prompt_timer_elapsed >= 0.15 && z1_prompt_timer_elapsed < 5 ))"
+    z1-prompt-timer-precmd
+    print "reset: $(( z1_prompt_timer_elapsed == 0 ))"'
+  assert_success
+  assert_line "measured: 1"
+  assert_line "reset: 1"
+}
+
+#
+# Transient prompt
+#
+# Transient collapses an accepted line to the character alone. It cannot be
+# observed without a terminal repainting, so these check the parts: the widget
+# binding, the collapsed string, and precmd putting the full prompt back. The
+# style is read in precmd, so these call it rather than only loading.
+#
+
 @test "transient prompt is off by default" {
   z1_zsh 'source $Z1
     autoload -Uz promptinit && promptinit && prompt z1
@@ -328,105 +587,33 @@ setup_chars() {
   assert_line "widget: user:other-accept-line"
 }
 
-@test "the branch name is magenta" {
-  mkdir -p "$TEST_HOME/repo"
-  git -C "$TEST_HOME/repo" init -q
-  git -C "$TEST_HOME/repo" config user.email t@example.com
-  git -C "$TEST_HOME/repo" config user.name tester
-  : >"$TEST_HOME/repo/file"
-  git -C "$TEST_HOME/repo" add file
-  git -C "$TEST_HOME/repo" commit -qm init
+#
+# Cleanup
+#
 
+# Switching to another theme has to leave nothing of this one behind.
+@test "switching away removes the prompt's hooks" {
   z1_zsh 'source $Z1
     autoload -Uz promptinit && promptinit && prompt z1
-    builtin cd $HOME/repo
-    prompt_z1_precmd; async-run; async-wait
-    o=$(print -Pn -- $RPROMPT); print "branch: ${(V)o}"'
+    print "before: $(( $precmd_functions[(I)z1-prompt-render] > 0 ))"
+    prompt off
+    print "precmd: $(( $precmd_functions[(I)prompt_z1_precmd] > 0 ))"
+    print "render: $(( $precmd_functions[(I)z1-prompt-render] > 0 ))"'
   assert_success
-  assert_output_contains "branch: ^[[38;5;168m"
+  assert_line "before: 1"
+  assert_line "precmd: 0"
+  assert_line "render: 0"
 }
 
-# The last path component is highlighted on its own: leading part blue, final
-# component bold and cyan.
-@test "the last path component is bold cyan and the rest blue" {
-  mkdir -p "$TEST_HOME/one/two/three"
-
-  z1_zsh 'source $Z1
+@test "switching away gives back accept-line" {
+  z1_zsh 'zstyle ":z1:prompt" transient yes
+    source $Z1
     autoload -Uz promptinit && promptinit && prompt z1
-    builtin cd $HOME/one/two/three
     prompt_z1_precmd
-    print "head: [$_prompt_z1_pwd_head]"
-    print "tail: [$_prompt_z1_pwd_tail]"
-    o=$(print -Pn -- $PROMPT); print "rendered: ${(V)o}"'
+    print "before: ${widgets[accept-line]}"
+    prompt off
+    print "after: ${widgets[accept-line]:-builtin}"'
   assert_success
-  assert_line "head: [~/o/t/]"
-  assert_line "tail: [three]"
-  assert_output_contains "^[[38;5;39m~/o/t/^[[39m^[[1m^[[38;5;37mthree^[[39m^[[0m"
-}
-
-@test "home is a single bold cyan component" {
-  z1_zsh 'source $Z1
-    autoload -Uz promptinit && promptinit && prompt z1
-    builtin cd $HOME
-    prompt_z1_precmd
-    print "head: [$_prompt_z1_pwd_head]"
-    print "tail: [$_prompt_z1_pwd_tail]"'
-  assert_success
-  assert_line "head: []"
-  assert_line "tail: [~]"
-}
-
-@test "root keeps its slash in the leading part" {
-  z1_zsh 'source $Z1
-    autoload -Uz promptinit && promptinit && prompt z1
-    builtin cd /
-    prompt_z1_precmd
-    print "head: [$_prompt_z1_pwd_head]"
-    print "tail: [$_prompt_z1_pwd_tail]"'
-  assert_success
-  assert_line "head: [/]"
-  assert_line "tail: []"
-}
-
-# vcs_info's git backend fills %m with rebase patch state, including a raw sha.
-# The hook clears it, since actionformats already names the action.
-@test "a rebase does not leak patch state into the prompt" {
-  local r="$TEST_HOME/repo"
-  git -C "$TEST_HOME" init -q repo
-  git -C "$r" config user.email t@example.com
-  git -C "$r" config user.name tester
-  echo one >"$r/f"; git -C "$r" add f; git -C "$r" commit -qm one
-  git -C "$r" checkout -q -b side
-  echo side >"$r/f"; git -C "$r" commit -qam side
-  git -C "$r" checkout -q -
-  echo main >"$r/f"; git -C "$r" commit -qam main
-  git -C "$r" rebase side >/dev/null 2>&1 || true
-
-  z1_zsh 'source $Z1
-    autoload -Uz promptinit && promptinit && prompt z1
-    builtin cd $HOME/repo
-    prompt_z1_precmd; async-run; async-wait
-    print "rprompt: ${(V)$(print -Pn -- $RPROMPT)}"'
-  assert_success
-  assert_output_contains "rebase"
-  refute_output_matches "applied"
-  refute_output_matches "[0-9a-f]{40}"
-}
-
-@test "the dirty marker uses the palette red, not basic red" {
-  local r="$TEST_HOME/repo"
-  git -C "$TEST_HOME" init -q repo
-  git -C "$r" config user.email t@example.com
-  git -C "$r" config user.name tester
-  : >"$r/tracked"; git -C "$r" add tracked; git -C "$r" commit -qm init
-  : >"$r/untracked"
-
-  z1_zsh 'source $Z1
-    autoload -Uz promptinit && promptinit && prompt z1
-    builtin cd $HOME/repo
-    prompt_z1_precmd; async-run; async-wait
-    print "rprompt: ${(V)$(print -Pn -- $RPROMPT)}"'
-  assert_success
-  assert_output_contains "^[[38;5;160m"
-  refute_output_matches '\^\[\[31m'
+  assert_line "before: user:prompt_z1_accept_line"
+  assert_line "after: builtin"
 }

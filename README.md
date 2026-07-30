@@ -137,15 +137,49 @@ autoload -Uz promptinit && promptinit
 prompt z1
 ```
 
+The prompt is one format string, so rearranging it does not mean rewriting it.
+`$name` is a segment, and `(...)` is a group that disappears unless something
+inside it has a value, which is how an optional segment avoids leaving a stray
+separator behind:
+
+```zsh
+# .zstyles
+zstyle ':z1:prompt' format '$pwd( on $git)( took $timer)
+$char '
+zstyle ':z1:prompt' right-format '$status'
+```
+
+Segments that ship with it: `pwd`, `git`, `char`, `status`, `timer`. The default
+shape uses the first three. Writing your own is a function that puts a prompt
+string in `$REPLY`:
+
+```zsh
+# .zshrc, after `prompt z1`
+function my-k8s-context { REPLY=$(kubectl config current-context 2>/dev/null) }
+z1-prompt-segment k8s my-k8s-context
+zstyle ':z1:prompt:segment:k8s' async 'yes'   # keep it off the critical path
+zstyle ':z1:prompt' format '$pwd( ⎈ $k8s) $char '
+z1-prompt-build
+```
+
 The bundled `z1` prompt reads these:
 
-| Context                | Style                                                          | Default           | What it does                                                              |
-| ---------------------- | -------------------------------------------------------------- | ----------------- | ------------------------------------------------------------------------- |
-| `:z1:prompt`           | `pwd-length`                                                   | short             | `full` for `$PWD`, `long` for a `~`-shortened path, otherwise abbreviated |
-| `:z1:prompt`           | `transient`                                                    | off               | Collapse an accepted line to just the prompt character                    |
-| `:z1:prompt:character` | `success` `error` `vicmd` `stash` `dirty` `ahead` `behind`     | `❱ ❱ ❰ ☰ • ⇡ ⇣`   | Symbols the prompt is built from                                          |
-| `:z1:prompt:colors`    | `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | 256-color palette | Color numbers the prompt is built from                                    |
-| `:z1:prompt:unicode`   | `disable`                                                      | off               | Fall back to ASCII symbols                                                |
+| Context                        | Style                                                          | Default           | What it does                                                              |
+| ------------------------------ | -------------------------------------------------------------- | ----------------- | ------------------------------------------------------------------------- |
+| `:z1:prompt`                   | `format`                                                       | `$pwd $char `     | The shape of the prompt                                                   |
+| `:z1:prompt`                   | `right-format`                                                 | `$git`            | The same, for the right-hand prompt                                       |
+| `:z1:prompt`                   | `pwd-length`                                                   | short             | `full` for `$PWD`, `long` for a `~`-shortened path, otherwise abbreviated |
+| `:z1:prompt`                   | `transient`                                                    | off               | Collapse an accepted line to just the prompt character                    |
+| `:z1:prompt`                   | `ascii`                                                        | off               | Fall back to ASCII symbols                                                |
+| `:z1:prompt`                   | `debug`                                                        | off               | Say why a segment never showed up                                         |
+| `:z1:prompt:character`         | `success` `error` `vicmd` `stash` `dirty` `ahead` `behind`     | `❯ ❯ ❮ ☰ • ⇡ ⇣`   | Symbols the prompt is built from                                          |
+| `:z1:prompt:palette`           | `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | 256-color palette | Color numbers the prompt is built from, plus any name of your own         |
+| `:z1:prompt:segment:<name>`    | `async`                                                        | on for `git`      | Run the segment in the background, given `lib/async.zsh`                  |
+| `:z1:prompt:segment:<name>`    | `disabled`                                                     | off               | Leave the segment out without editing the format                          |
+| `:z1:prompt:segment:timer`     | `threshold`                                                    | 5                 | Seconds a command has to take before the timer says anything              |
+
+`lib/prompt.zsh` is the engine on its own, with no segments and no opinions about
+what a prompt looks like, if you would rather build one from scratch.
 
 ### Variables
 
